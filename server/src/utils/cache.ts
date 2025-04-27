@@ -42,51 +42,100 @@ export class CacheImpl {
             console.error(e.message);
         }
     }
+    
     async all() {
         if (!this.loaded) {
             await this.load();
         }
         return this.cache;
     }
+    
     async get(key: string) {
         if (!this.loaded) {
             await this.load();
         }
         return this.cache.get(key);
     }
+    
+    // 检查并使缓存过期的方法（适合低频更新的博客）
+    async checkAndExpireCache(maxAgeHours: number = 6) {
+        if (!this.loaded) {
+            await this.load();
+        }
+        
+        const currentTime = Date.now();
+        const timestampKeys = Array.from(this.cache.keys()).filter(key => key.endsWith('_timestamp'));
+        
+        let expired = false;
+        for (const timestampKey of timestampKeys) {
+            const timestamp = this.cache.get(timestampKey);
+            if (timestamp && (currentTime - timestamp > maxAgeHours * 60 * 60 * 1000)) {
+                // 移除缓存键（去掉_timestamp后缀）
+                const cacheKey = timestampKey.replace('_timestamp', '');
+                console.log(`缓存过期: ${cacheKey}, 已清除`);
+                
+                // 删除缓存条目及其时间戳
+                this.cache.delete(cacheKey);
+                this.cache.delete(timestampKey);
+                expired = true;
+            }
+        }
+        
+        if (expired) {
+            await this.save();
+        }
+        
+        return expired;
+    }
+    
     async getByPrefix(prefix: string): Promise<any[]> {
         if (!this.loaded) {
             await this.load();
         }
         const result = [];
         for (let key of this.cache.keys()) {
-            if (key.startsWith(prefix)) {
+            if (key.startsWith(prefix) && !key.endsWith('_timestamp')) {
                 result.push(this.cache.get(key));
             }
         }
         return result;
     }
+    
     async getBySuffix(suffix: string): Promise<any[]> {
         if (!this.loaded) {
             await this.load();
         }
         const result = [];
         for (let key of this.cache.keys()) {
-            if (key.endsWith(suffix)) {
+            if (key.endsWith(suffix) && !key.endsWith('_timestamp')) {
                 result.push(this.cache.get(key));
             }
         }
         return result;
     }
+    
     async getOrSet<T>(key: string, value: () => Promise<T>) {
         const cached = await this.get(key)
         if (cached !== undefined) {
+            // 检查时间戳，如果超过6小时则刷新
+            const timestamp = await this.get(`${key}_timestamp`);
+            const currentTime = Date.now();
+            
+            if (!timestamp || (currentTime - timestamp > 6 * 60 * 60 * 1000)) {
+                console.log('Cache expired, refreshing', key);
+                const newValue = await value();
+                await this.set(key, newValue);
+                await this.set(`${key}_timestamp`, currentTime, false);
+                return newValue;
+            }
+            
             console.log('Cache hit', key);
             return cached as T;
         }
         console.log('Cache miss', key);
         const newValue = await value();
         await this.set(key, newValue);
+        await this.set(`${key}_timestamp`, Date.now(), false);
         return newValue;
     }
 
@@ -108,31 +157,55 @@ export class CacheImpl {
         if (!this.loaded)
             await this.load();
         this.cache.delete(key);
+        // 同时删除对应的时间戳
+        this.cache.delete(`${key}_timestamp`);
         if (save) {
             await this.save();
         }
     }
 
     async deletePrefix(prefix: string) {
+        const keysToDelete = [];
+        
         for (let key of this.cache.keys()) {
-            console.log('Cache key', key);
             if (key.startsWith(prefix)) {
-                console.log('Cache delete', key);
-                await this.delete(key, false);
+                keysToDelete.push(key);
+                // 同时添加对应的时间戳键
+                if (!key.endsWith('_timestamp')) {
+                    keysToDelete.push(`${key}_timestamp`);
+                }
             }
         }
+        
+        for (const key of keysToDelete) {
+            console.log('Cache delete', key);
+            await this.delete(key, false);
+        }
+        
         await this.save();
     }
+    
     async deleteSuffix(suffix: string) {
+        const keysToDelete = [];
+        
         for (let key of this.cache.keys()) {
-            console.log("Cache key", key);
             if (key.endsWith(suffix)) {
-                console.log("Cache delete", key);
-                await this.delete(key, false);
+                keysToDelete.push(key);
+                // 对于非时间戳键，同时添加对应的时间戳键
+                if (!key.endsWith('_timestamp')) {
+                    keysToDelete.push(`${key}_timestamp`);
+                }
             }
         }
+        
+        for (const key of keysToDelete) {
+            console.log("Cache delete", key);
+            await this.delete(key, false);
+        }
+        
         await this.save();
     }
+    
     async clear() {
         this.cache.clear();
         await this.save();
