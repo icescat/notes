@@ -25,10 +25,28 @@ export function FeedService() {
                     const page_num = (page ? page > 0 ? page : 1 : 1) - 1;
                     const limit_num = limit ? +limit > 50 ? 50 : +limit : 20;
                     const cacheKey = `feeds_${type}_${page_num}_${limit_num}`;
-                    const cached = await cache.get(cacheKey);
-                    if (cached) {
-                        return cached;
+                    
+                    // 对于公开文章，检查缓存是否存在及其时间戳
+                    const forceRefresh = type === undefined || type === 'normal' || type === '';
+                    let cached = null;
+                    
+                    if (!forceRefresh) {
+                        cached = await cache.get(cacheKey);
+                        if (cached) {
+                            return cached;
+                        }
+                    } else {
+                        // 检查缓存和时间戳
+                        cached = await cache.get(cacheKey);
+                        const cacheTimestamp = await cache.get(`${cacheKey}_timestamp`);
+                        const currentTime = Date.now();
+                        
+                        // 如果缓存存在且不超过24小时，则使用缓存
+                        if (cached && cacheTimestamp && (currentTime - cacheTimestamp < 24 * 60 * 60 * 1000)) {
+                            return cached;
+                        }
                     }
+                    
                     const where = type === 'draft' ? eq(feeds.draft, 1) : type === 'unlisted' ? and(eq(feeds.draft, 0), eq(feeds.listed, 0)) : and(eq(feeds.draft, 0), eq(feeds.listed, 1));
                     const size = await db.select({ count: count() }).from(feeds).where(where);
                     if (size[0].count === 0) {
@@ -79,8 +97,12 @@ export function FeedService() {
                         data: feed_list,
                         hasNext
                     }
-                    if (type === undefined || type === 'normal' || type === '')
+                    if (type === undefined || type === 'normal' || type === '') {
                         await cache.set(cacheKey, data);
+                        // 保存缓存时间戳
+                        await cache.set(`${cacheKey}_timestamp`, Date.now(), false);
+                        await cache.save();
+                    }
                     return data
                 }, {
                     query: t.Object({
@@ -602,14 +624,38 @@ type FeedItem = {
 
 async function clearFeedCache(id: number, alias: string | null, newAlias: string | null) {
     const cache = PublicCache()
-    await cache.deletePrefix('feeds_');
-    await cache.deletePrefix('search_');
+    
+    // 删除feeds相关缓存及其时间戳
+    const prefixes = ['feeds_', 'search_'];
+    for (const prefix of prefixes) {
+        const keys = Array.from((await cache.all()).keys())
+            .filter(k => k.startsWith(prefix) && !k.endsWith('_timestamp'));
+        
+        for (const key of keys) {
+            console.log('清除缓存:', key);
+            await cache.delete(key, false);
+            await cache.delete(`${key}_timestamp`, false);
+        }
+    }
+    
+    // 删除特定文章的缓存
     await cache.delete(`feed_${id}`, false);
+    await cache.delete(`feed_${id}_timestamp`, false);
+    
+    // 删除相关导航缓存
     await cache.deletePrefix(`${id}_previous_feed`);
     await cache.deletePrefix(`${id}_next_feed`);
+    
+    // 处理别名
     if (alias === newAlias) return;
-    if (alias)
+    if (alias) {
         await cache.delete(`feed_${alias}`, false);
-    if (newAlias)
+        await cache.delete(`feed_${alias}_timestamp`, false);
+    }
+    if (newAlias) {
         await cache.delete(`feed_${newAlias}`, false);
+        await cache.delete(`feed_${newAlias}_timestamp`, false);
+    }
+    
+    await cache.save();
 }
